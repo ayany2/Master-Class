@@ -1,24 +1,20 @@
 import numpy as np
 import faiss
 import pickle
-from flask import Flask, request, render_template
+from flask import Flask, request, render_template, redirect, url_for
 from PIL import Image
 from io import BytesIO
 from tensorflow.keras.applications.resnet50 import ResNet50, preprocess_input
-from tensorflow.keras.preprocessing import image
 
 app = Flask(__name__)
 
-# Load FAISS index and metadata
 faiss_index = None
 labels_for_index = None
 names_for_index = None
 
 try:
-    # Load FAISS index
     faiss_index = faiss.read_index('Dataset/lfw_embeddings_index.faiss')
     
-    # Debug the type of index
     if isinstance(faiss_index, faiss.Index):
         print("FAISS index loaded successfully.")
     else:
@@ -35,8 +31,20 @@ except Exception as e:
     print(f"Error loading FAISS index or metadata: {e}")
     faiss_index = None
 
-# Initialize ResNet50 model for embedding
 model = ResNet50(weights='imagenet', include_top=False, pooling='avg')
+
+def preprocess_image(img):
+    """
+    Preprocesses the input image, converting grayscale to RGB, resizing, and applying preprocess_input
+    """
+    if img.mode != 'RGB':
+        img = img.convert('RGB') 
+    
+    img = img.resize((224, 224)) 
+    img_array = np.array(img)
+    img_array = np.expand_dims(img_array, axis=0)
+    img_array = preprocess_input(img_array)
+    return img_array
 
 @app.route('/')
 def index():
@@ -50,28 +58,37 @@ def upload():
     file = request.files['file']
     if file:
         try:
-            # Load and preprocess the image
             img = Image.open(BytesIO(file.read()))
-            img = img.resize((224, 224))  # Resize to match ResNet50 input size
-            img_array = image.img_to_array(img)
-            img_array = np.expand_dims(img_array, axis=0)
-            img_array = preprocess_input(img_array)
+            img_array = preprocess_image(img)
 
-            # Generate embedding using ResNet50
             embedding = model.predict(img_array)
             embedding = embedding.flatten()
 
-            # Search for similar faces in FAISS index
-            D, I = faiss_index.search(np.array([embedding]), k=1)
-            closest_index = I[0][0]
-            closest_name = names_for_index[closest_index]
+            D, I = faiss_index.search(np.array([embedding]), k=5)
 
-            return f"The closest match is {closest_name}."
+            results = [(D[0][i], names_for_index[I[0][i]]) for i in range(len(I[0]))]
+
+            results.sort(key=lambda x: x[0])
+
+            results_for_redirect = '|'.join([f"{name}:{distance}" for distance, name in results])
+
+            return redirect(url_for('results_page', results=results_for_redirect))
 
         except Exception as e:
             return f"Error processing image: {e}"
 
     return "No file uploaded."
 
+@app.route('/results')
+def results_page():
+    results_string = request.args.get('results')
+
+    if results_string:
+        results = [(float(item.split(':')[1]), item.split(':')[0]) for item in results_string.split('|')]
+    else:
+        results = []
+
+    return render_template('results.html', results=results)
+
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, port=5001)
